@@ -9,22 +9,31 @@ use Elasticsearch\Client;
 use Elasticsearch\ClientBuilder;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Foundation\Application;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Traits\ForwardsCalls;
 use InvalidArgumentException;
 use JetBrains\PhpStorm\Deprecated;
+use JsonException;
 use Matchory\Elasticsearch\Interfaces\ClientFactoryInterface;
 use Matchory\Elasticsearch\Interfaces\ConnectionInterface;
 use Matchory\Elasticsearch\Interfaces\ConnectionResolverInterface as Resolver;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
 use Psr\SimpleCache\CacheInterface;
+use Sentry\Breadcrumb;
+use Sentry\Laravel\ServiceProvider as SentryProvider;
+use Sentry\State\HubInterface;
+
+use function assert;
+use function json_encode;
+
+use const JSON_THROW_ON_ERROR;
 
 /**
  * Connection
- * ==========
  *
  * @package Matchory\Elasticsearch
  */
@@ -43,24 +52,6 @@ class Connection implements ConnectionInterface
     private static $resolver;
 
     /**
-     * Used to hold all connections.
-     *
-     * @var Client[]
-     * @deprecated
-     * @todo remove in next major version
-     */
-    #[Deprecated]
-    protected $clients = [];
-
-    /**
-     * Elasticsearch client instance used for this connection.
-     *
-     * @var Client
-     * @see Connection::getClient()
-     */
-    protected $client;
-
-    /**
      * Cache instance to be used for this connection. In Laravel applications,
      * this will be an instance of the Cache Repository, which is the same as
      * the instance returned from the Cache facade.
@@ -72,9 +63,32 @@ class Connection implements ConnectionInterface
     protected $cache;
 
     /**
+     * Elasticsearch client instance used for this connection.
+     *
+     * @var Client
+     * @see Connection::getClient()
+     */
+    protected $client;
+
+    /**
+     * Used to hold all connections.
+     *
+     * @var Client[]
+     * @deprecated
+     * @todo remove in next major version
+     */
+    #[Deprecated]
+    protected $clients = [];
+
+    /**
      * @var string|null
      */
     protected $index;
+
+    /**
+     * @var bool
+     */
+    protected $reportQueries;
 
     /**
      * Creates a new connection
@@ -82,15 +96,101 @@ class Connection implements ConnectionInterface
      * @param Client              $client
      * @param CacheInterface|null $cache
      * @param string|null         $index
+     * @param bool                $reportQueries
      */
-    public function __construct(
+    final public function __construct(
         Client $client,
         ?CacheInterface $cache = null,
-        ?string $index = null
+        ?string $index = null,
+        bool $reportQueries = true
     ) {
         $this->client = $client;
         $this->index = $index;
         $this->cache = $cache;
+        $this->reportQueries = $reportQueries;
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function getCache(): ?CacheInterface
+    {
+        return $this->cache;
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function getClient(): Client
+    {
+        return $this->client;
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function index(string $index): Query
+    {
+        return $this->newQuery()->index($index);
+    }
+
+    public function insert(
+        array $parameters,
+        ?string $index = null,
+        ?string $type = null
+    ): object {
+        if (
+            ! isset($parameters[Query::PARAM_INDEX]) &&
+            $index = $index ?? $this->index
+        ) {
+            $parameters[Query::PARAM_INDEX] = $index;
+        }
+
+        if ($type) {
+            $parameters[Query::PARAM_TYPE] = $type;
+        }
+
+        if ($this->reportQueries) {
+            $this->reportQuery($parameters);
+        }
+
+        return (object)$this->client->index($parameters);
+    }
+
+    /**
+     * Route the request to the query class
+     *
+     * @param string|null $connection Deprecated parameter: Use the proper
+     *                                connection instance directly instead of
+     *                                passing the name. This parameter will be
+     *                                removed in the next major version.
+     *
+     * @return Query
+     */
+    public function newQuery(?string $connection = null): Query
+    {
+        // TODO: This is deprecated behaviour and should be removed in the next
+        //       major version.
+        if ($connection) {
+            /** @noinspection PhpDeprecationInspection */
+            return static::$resolver
+                ->connection($connection)
+                ->newQuery();
+        }
+
+        return (new Query($this))->index($this->index);
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function search(array $parameters): array
+    {
+        if ($this->reportQueries) {
+            $this->reportQuery($parameters);
+        }
+
+        return $this->getClient()->search($parameters);
     }
 
     /**
@@ -150,7 +250,7 @@ class Connection implements ConnectionInterface
      * Create a native connection suitable for any non-laravel or non-lumen apps
      * any composer based frameworks
      *
-     * @param $config
+     * @param mixed $config
      *
      * @return Query
      * @throws BindingResolutionException
@@ -174,6 +274,24 @@ class Connection implements ConnectionInterface
             $client,
             $config['index'] ?? null
         ))->newQuery();
+    }
+
+    /**
+     * Proxy  calls to the default connection
+     *
+     * @param string $name
+     * @param array  $arguments
+     *
+     * @return mixed
+     * @throws BadMethodCallException
+     */
+    public function __call(string $name, array $arguments)
+    {
+        return $this->forwardCallTo(
+            $this->newQuery(),
+            $name,
+            $arguments
+        );
     }
 
     /**
@@ -211,90 +329,29 @@ class Connection implements ConnectionInterface
         return (bool)static::$resolver->connection($name);
     }
 
-    /**
-     * Proxy  calls to the default connection
-     *
-     * @param string $name
-     * @param array  $arguments
-     *
-     * @return mixed
-     * @throws BadMethodCallException
-     */
-    public function __call(string $name, array $arguments)
+    private function reportQuery(array $query): void
     {
-        return $this->forwardCallTo(
-            $this->newQuery(),
-            $name,
-            $arguments
-        );
-    }
+        $app = app();
+        assert($app instanceof Application);
 
-    /**
-     * @inheritDoc
-     */
-    public function getCache(): ?CacheInterface
-    {
-        return $this->cache;
-    }
-
-    /**
-     * @inheritDoc
-     */
-    public function getClient(): Client
-    {
-        return $this->client;
-    }
-
-    /**
-     * @inheritDoc
-     */
-    public function index(string $index): Query
-    {
-        return $this->newQuery()->index($index);
-    }
-
-    public function insert(
-        array $parameters,
-        ?string $index = null,
-        ?string $type = null
-    ): object {
-        if (
-            ! isset($parameters[Query::PARAM_INDEX]) &&
-            $index = $index ?? $this->index
-        ) {
-            $parameters[Query::PARAM_INDEX] = $index;
+        if ( ! $app->providerIsLoaded(SentryProvider::class)) {
+            return;
         }
 
-        if ($type) {
-            $parameters[Query::PARAM_TYPE] = $type;
+        $sentry = $app->make(HubInterface::class);
+        assert($sentry instanceof HubInterface);
+
+        try {
+            /** @noinspection PhpUnhandledExceptionInspection */
+            $sentry->addBreadcrumb(new Breadcrumb(
+                Breadcrumb::LEVEL_INFO,
+                Breadcrumb::TYPE_DEFAULT,
+                'elasticsearch.query',
+                json_encode($query, JSON_THROW_ON_ERROR) ?: '',
+            ));
+        } catch (JsonException) {
+            // We don't want errors during reporting to bubble up to
+            // the application
         }
-
-        return (object)$this->client->index($parameters);
-    }
-
-    /**
-     * Route the request to the query class
-     *
-     * @param string|null $connection Deprecated parameter: Use the proper
-     *                                connection instance directly instead of
-     *                                passing the name. This parameter will be
-     *                                removed in the next major version.
-     *
-     * @return Query
-     */
-    public function newQuery(?string $connection = null): Query
-    {
-        // TODO: This is deprecated behaviour and should be removed in the next
-        //       major version.
-        if ($connection) {
-            /** @noinspection PhpDeprecationInspection */
-            return static::$resolver
-                ->connection($connection)
-                ->newQuery();
-        }
-
-        $query = new Query($this);
-
-        return $query->index($this->index);
     }
 }

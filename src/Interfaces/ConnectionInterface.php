@@ -16,11 +16,27 @@ use Psr\SimpleCache\CacheInterface;
 interface ConnectionInterface
 {
     /**
-     * Creates a new Elasticsearch query
+     * Retrieves the cache instance, if configured.
      *
-     * @return Query
+     * @return CacheInterface|null
      */
-    public function newQuery(): Query;
+    public function getCache(): ?CacheInterface;
+
+    /**
+     * Retrieves the Elasticsearch client.
+     *
+     * @return Client
+     */
+    public function getClient(): Client;
+
+    /**
+     * Create a new query on the given index.
+     *
+     * @param string $index Name of the index to query.
+     *
+     * @return Query Query builder instance.
+     */
+    public function index(string $index): Query;
 
     /**
      * Adds a document to the index using the specified parameters.
@@ -42,25 +58,18 @@ interface ConnectionInterface
     ): object;
 
     /**
-     * Create a new query on the given index.
+     * Creates a new Elasticsearch query
      *
-     * @param string $index Name of the index to query.
-     *
-     * @return Query Query builder instance.
+     * @return Query
      */
-    public function index(string $index): Query;
+    public function newQuery(): Query;
 
     /**
-     * Retrieves the Elasticsearch client.
+     * Executes a search query.
      *
-     * @return Client
-     */
-    public function getClient(): Client;
-
-    /**
-     * Retrieves the cache instance, if configured.
+     * @param array $parameters Parameters to the search endpoint.
      *
-     * @return CacheInterface|null
+     * @return array
      */
-    public function getCache(): ?CacheInterface;
+    public function search(array $parameters): array;
 }

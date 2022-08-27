@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 return [
 
     /*
@@ -38,6 +40,9 @@ return [
 
             // Elasticsearch handlers
             // 'handler' => new MyCustomHandler(),
+
+            // Uncomment to disable reporting queries to Sentry as breadcrumbs
+            // 'report_queries' => false
         ],
     ],
 

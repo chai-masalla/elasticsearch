@@ -418,10 +418,7 @@ trait ExecutesQueries
                 ]);
         } else {
             $query = $this->buildQuery();
-            $result = $this
-                ->getConnection()
-                ->getClient()
-                ->search($query);
+            $result = $this->getConnection()->search($query);
         }
 
         // We attempt to cache the results if we have a cache instance, and the

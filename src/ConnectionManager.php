@@ -31,19 +31,14 @@ class ConnectionManager implements ConnectionResolverInterface
 
     public const CONFIG_KEY_INDEX = 'index';
 
+    public const CONFIG_KEY_REPORT_QUERIES = 'report_queries';
+
     public const CONFIG_KEY_SERVERS = 'servers';
 
     /**
-     * All of the registered connections.
-     *
-     * @var array<string, ConnectionInterface>
+     * @var CacheInterface|null
      */
-    protected $connections = [];
-
-    /**
-     * @var array
-     */
-    protected $configuration;
+    protected $cache;
 
     /**
      * @var ClientFactoryInterface
@@ -51,9 +46,16 @@ class ConnectionManager implements ConnectionResolverInterface
     protected $clientFactory;
 
     /**
-     * @var CacheInterface|null
+     * @var array
      */
-    protected $cache;
+    protected $configuration;
+
+    /**
+     * All the registered connections.
+     *
+     * @var array<string, ConnectionInterface>
+     */
+    protected $connections = [];
 
     /**
      * @var LoggerInterface|null
@@ -78,6 +80,35 @@ class ConnectionManager implements ConnectionResolverInterface
         $this->clientFactory = $clientFactory;
         $this->cache = $cache;
         $this->logger = $logger;
+    }
+
+    /**
+     * Dynamically pass methods to the default connection.
+     *
+     * @param string $method
+     * @param array  $parameters
+     *
+     * @return mixed
+     * @throws InvalidArgumentException
+     */
+    public function __call(string $method, array $parameters)
+    {
+        return $this->connection()->$method(...$parameters);
+    }
+
+    /**
+     * Add a connection to the resolver.
+     *
+     * @param string              $name
+     * @param ConnectionInterface $connection
+     *
+     * @return void
+     */
+    public function addConnection(
+        string $name,
+        ConnectionInterface $connection
+    ): void {
+        $this->connections[$name] = $connection;
     }
 
     /**
@@ -124,21 +155,6 @@ class ConnectionManager implements ConnectionResolverInterface
     }
 
     /**
-     * Add a connection to the resolver.
-     *
-     * @param string              $name
-     * @param ConnectionInterface $connection
-     *
-     * @return void
-     */
-    public function addConnection(
-        string $name,
-        ConnectionInterface $connection
-    ): void {
-        $this->connections[$name] = $connection;
-    }
-
-    /**
      * Check if a connection has been registered.
      *
      * @param string $name
@@ -148,20 +164,6 @@ class ConnectionManager implements ConnectionResolverInterface
     public function hasConnection(string $name): bool
     {
         return isset($this->connections[$name]);
-    }
-
-    /**
-     * Dynamically pass methods to the default connection.
-     *
-     * @param string $method
-     * @param array  $parameters
-     *
-     * @return mixed
-     * @throws InvalidArgumentException
-     */
-    public function __call(string $method, array $parameters)
-    {
-        return $this->connection()->$method(...$parameters);
     }
 
     /**
@@ -190,7 +192,8 @@ class ConnectionManager implements ConnectionResolverInterface
         return new Connection(
             $client,
             $this->cache,
-            $config[self::CONFIG_KEY_INDEX] ?? null
+            $config[self::CONFIG_KEY_INDEX] ?? null,
+            $config[self::CONFIG_KEY_REPORT_QUERIES] ?? true,
         );
     }
 }
